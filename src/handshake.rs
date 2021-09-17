@@ -1,7 +1,4 @@
-use crate::{
-    compat::{AllowStd, SetWaker},
-    WebSocketStream,
-};
+use crate::{compat::AllowStd, WebSocketStream};
 use log::*;
 use std::{
     future::Future,
@@ -47,7 +44,10 @@ where
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let inner = self.get_mut().0.take().expect("future polled after completion");
         trace!("Setting context when skipping handshake");
-        let stream = AllowStd::new(inner.stream, ctx.waker());
+        let stream = AllowStd {
+            inner: inner.stream,
+            context: ctx as *mut _ as *mut (),
+        };
 
         Poll::Ready((inner.f)(stream))
     }
@@ -69,7 +69,7 @@ struct StartedHandshakeFutureInner<F, S> {
 async fn handshake<Role, F, S>(stream: S, f: F) -> Result<Role::FinalResult, Error<Role>>
 where
     Role: HandshakeRole + Unpin,
-    Role::InternalStream: SetWaker + Unpin,
+    Role::InternalStream: Unpin,
     F: FnOnce(AllowStd<S>) -> Result<Role::FinalResult, Error<Role>> + Unpin,
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -123,7 +123,7 @@ where
 impl<Role, F, S> Future for StartedHandshakeFuture<F, S>
 where
     Role: HandshakeRole,
-    Role::InternalStream: SetWaker + Unpin,
+    Role::InternalStream: Unpin,
     F: FnOnce(AllowStd<S>) -> Result<Role::FinalResult, Error<Role>> + Unpin,
     S: Unpin,
     AllowStd<S>: Read + Write,
@@ -133,7 +133,10 @@ where
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let inner = self.0.take().expect("future polled after completion");
         trace!("Setting ctx when starting handshake");
-        let stream = AllowStd::new(inner.stream, ctx.waker());
+        let stream = AllowStd {
+            inner: inner.stream,
+            context: ctx as *mut _ as *mut (),
+        };
 
         match (inner.f)(stream) {
             Ok(r) => Poll::Ready(Ok(StartedHandshake::Done(r))),
@@ -146,16 +149,12 @@ where
 impl<Role> Future for MidHandshake<Role>
 where
     Role: HandshakeRole + Unpin,
-    Role::InternalStream: SetWaker + Unpin,
+    Role::InternalStream: Unpin,
 {
     type Output = Result<Role::FinalResult, Error<Role>>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut s = self.as_mut().0.take().expect("future polled after completion");
-
-        let machine = s.get_mut();
-        trace!("Setting context in handshake");
-        machine.get_mut().set_waker(cx.waker());
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let s = self.as_mut().0.take().expect("future polled after completion");
 
         match s.handshake() {
             Ok(stream) => Poll::Ready(Ok(stream)),
